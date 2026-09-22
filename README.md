@@ -17,9 +17,9 @@ If you use this library, expect to have to make changes when you update the code
 # Zig release support
 
 `zig-sqlite` follows Zig's release structure:
-- [master](https://github.com/vrischmann/zig-sqlite) tracks Zig master
-- [zig-0.17.0](https://github.com/vrischmann/zig-sqlite/tree/zig-0.17.0) tracks Zig 0.17.0
-- [zig-0.16.0](https://github.com/vrischmann/zig-sqlite/tree/zig-0.16.0) tracks Zig 0.16.0
+- [master](https://github.com/samooth/zig-sqlite) tracks Zig master
+- [zig-0.17.0](https://github.com/samooth/zig-sqlite/tree/zig-0.17.0) tracks Zig 0.17.0
+- [zig-0.16.0](https://github.com/samooth/zig-sqlite/tree/zig-0.16.0) tracks Zig 0.16.0
 
 The plan is to support releases once Zig 1.0 is released but this can still change.
 
@@ -80,7 +80,7 @@ For sqlite, you have options depending on your target:
 Use the following `zig fetch` command:
 
 ```
-zig fetch --save git+https://github.com/vrischmann/zig-sqlite
+zig fetch --save git+https://github.com/samooth/zig-sqlite
 ```
 
 Now in your `build.zig` you can access the module like this:
