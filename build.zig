@@ -230,28 +230,6 @@ pub fn build(b: *std.Build) !void {
 
     const c_flags = flags.items;
 
-    // Preprocess the upstream sqlite3.h / sqlite3ext.h into
-    // c/loadable-ext-*.h so `zig translate-c` can produce the
-    // c_bindings_ext module (used for loadable extensions).
-    const preprocess = addPreprocessStep(b, io, sqlite_dep);
-
-    // C bindings via translate-c (works for both Zig 0.16 and 0.17+)
-    const c_bindings = b.addTranslateC(.{
-        .root_source_file = b.path("c/c_bindings.c"),
-        .target = target,
-        .optimize = optimize,
-    });
-    c_bindings.addIncludePath(sqlite_dep.path("."));
-    c_bindings.addIncludePath(b.path("c"));
-
-    const c_bindings_ext = b.addTranslateC(.{
-        .root_source_file = b.path("c/c_bindings_ext.c"),
-        .target = target,
-        .optimize = optimize,
-    });
-    c_bindings_ext.addIncludePath(b.path("c"));
-    c_bindings_ext.step.dependOn(&preprocess.step);
-
     //
     // Main library and module
     //
@@ -264,7 +242,8 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("sqlite.zig"),
             .link_libc = true,
         });
-        mod.addImport("c_bindings", c_bindings.createModule());
+        mod.addIncludePath(b.path("c"));
+        mod.addIncludePath(sqlite_dep.path("."));
         mod.linkLibrary(lib);
 
         break :blk .{ lib, mod };
@@ -279,7 +258,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("sqlite.zig"),
             .link_libc = true,
         });
-        mod.addImport("c_bindings", c_bindings_ext.createModule());
+        mod.addIncludePath(b.path("c"));
         mod.linkLibrary(lib);
 
         break :blk mod;
@@ -294,11 +273,6 @@ pub fn build(b: *std.Build) !void {
     }};
     const test_step = b.step("test", "Run library tests");
 
-    // By default the tests will only be execute for native test targets, however they will be compiled
-    // for _all_ targets defined in `test_targets`.
-    //
-    // If you want to execute tests for other targets you can pass -fqemu, -fdarling, -fwine, -frosetta.
-
     for (test_targets) |test_target| {
         const cross_target = getTarget(b.resolveTargetQuery(test_target.query));
         const single_threaded_txt = if (test_target.single_threaded) "single" else "multi";
@@ -309,15 +283,6 @@ pub fn build(b: *std.Build) !void {
         });
 
         const test_sqlite_lib = try makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with, test_name);
-
-        // Per-target C bindings
-        const test_c_bindings = b.addTranslateC(.{
-            .root_source_file = b.path("c/c_bindings.c"),
-            .target = cross_target,
-            .optimize = optimize,
-        });
-        test_c_bindings.addIncludePath(sqlite_dep.path("."));
-        test_c_bindings.addIncludePath(b.path("c"));
 
         const mod = b.addModule(test_name, .{
             .target = cross_target,
@@ -330,7 +295,8 @@ pub fn build(b: *std.Build) !void {
             .name = test_name,
             .root_module = mod,
         });
-        tests.root_module.addImport("c_bindings", test_c_bindings.createModule());
+        tests.root_module.addIncludePath(b.path("c"));
+        tests.root_module.addIncludePath(sqlite_dep.path("."));
         tests.root_module.linkLibrary(test_sqlite_lib);
 
         const tests_options = b.addOptions();
@@ -341,13 +307,9 @@ pub fn build(b: *std.Build) !void {
 
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
-
-        // Make sure the fork's own test build exercises the consumer-path
-        // translate-c (which depends on the preprocessed headers). Without
-        // this, a broken preprocessor would only surface in downstream
-        // consumers' builds.
-        test_c_bindings.step.dependOn(&preprocess.step);
     }
+
+    addPreprocessStep(b, io, sqlite_dep);
 }
 
 fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
@@ -391,7 +353,7 @@ fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std
     return run;
 }
 
-fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) *PreprocessStep {
+fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) void {
     var wf = b.addWriteFiles();
 
     const preprocess = PreprocessStep.create(b, .{
@@ -408,8 +370,6 @@ fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) *
 
     const preprocess_headers = b.step("preprocess-headers", "Preprocess the headers for the loadable extensions");
     preprocess_headers.dependOn(&w.step);
-
-    return preprocess;
 }
 
 const PreprocessStep = struct {
