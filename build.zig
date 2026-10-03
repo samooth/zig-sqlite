@@ -110,9 +110,8 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 }
 
 // This creates a SQLite static library from the SQLite dependency code.
-fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }, module_suffix: []const u8) !*std.Build.Step.Compile {
-    const mod_name = try std.fmt.allocPrint(b.allocator, "lib-sqlite-{s}{s}", .{ module_suffix, if (sqlite_c == .with) "-with" else "-without" });
-    const mod = b.addModule(mod_name, .{
+fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
+    const mod = b.addModule("lib-sqlite", .{
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -230,13 +229,18 @@ pub fn build(b: *std.Build) !void {
 
     const c_flags = flags.items;
 
+    // Preprocess the upstream sqlite3.h / sqlite3ext.h into
+    // c/loadable-ext-*.h so `zig translate-c` can produce the
+    // c_bindings_ext module (used for loadable extensions).
+    const preprocess = addPreprocessStep(b, io, sqlite_dep);
+
     //
     // Main library and module
     //
 
     // const sqlite_lib, const sqlite_mod = blk: {
     const sqlite_lib, _ = blk: {
-        const lib = try makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .with, "main");
+        const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .with);
 
         const mod = b.addModule("sqlite", .{
             .root_source_file = b.path("sqlite.zig"),
@@ -252,7 +256,7 @@ pub fn build(b: *std.Build) !void {
 
     // const sqliteext_mod = blk: {
     _ = blk: {
-        const lib = try makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .without, "ext");
+        const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .without);
 
         const mod = b.addModule("sqliteext", .{
             .root_source_file = b.path("sqlite.zig"),
@@ -282,7 +286,7 @@ pub fn build(b: *std.Build) !void {
             single_threaded_txt,
         });
 
-        const test_sqlite_lib = try makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with, test_name);
+        const test_sqlite_lib = makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with);
 
         const mod = b.addModule(test_name, .{
             .target = cross_target,
@@ -309,7 +313,7 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&run_tests.step);
     }
 
-    addPreprocessStep(b, io, sqlite_dep);
+    test_step.dependOn(&preprocess.step);
 }
 
 fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
@@ -353,7 +357,7 @@ fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std
     return run;
 }
 
-fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) void {
+fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) *PreprocessStep {
     var wf = b.addWriteFiles();
 
     const preprocess = PreprocessStep.create(b, .{
@@ -370,6 +374,8 @@ fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) v
 
     const preprocess_headers = b.step("preprocess-headers", "Preprocess the headers for the loadable extensions");
     preprocess_headers.dependOn(&w.step);
+
+    return preprocess;
 }
 
 const PreprocessStep = struct {
