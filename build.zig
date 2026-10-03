@@ -9,6 +9,70 @@ const Io = std.Io;
 
 const Preprocessor = @import("build/Preprocessor.zig");
 
+const PreprocessStep = struct {
+    const Config = struct {
+        source: std.Build.LazyPath,
+        target: std.Build.LazyPath,
+        io: Io,
+    };
+
+    step: std.Build.Step,
+
+    source: std.Build.LazyPath,
+    target: std.Build.LazyPath,
+    io: Io,
+
+    fn create(owner: *std.Build, config: Config) *PreprocessStep {
+        const step = owner.allocator.create(PreprocessStep) catch @panic("OOM");
+        step.* = .{
+            .step = std.Build.Step.init(.{
+                .id = std.Build.Step.Id.custom,
+                .name = "preprocess",
+                .owner = owner,
+                .makeFn = make,
+            }),
+            .source = config.source,
+            .target = config.target,
+            .io = config.io,
+        };
+
+        return step;
+    }
+
+    fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) !void {
+        const ps: *PreprocessStep = @fieldParentPtr("step", step);
+        const owner = step.owner;
+
+        const sqlite3_h = try ps.source.path(owner, "sqlite3.h").getPath3(owner, step).toString(owner.allocator);
+        const sqlite3ext_h = try ps.source.path(owner, "sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
+
+        const loadable_sqlite3_h = try ps.target.path(owner, "loadable-ext-sqlite3.h").getPath3(owner, step).toString(owner.allocator);
+        const loadable_sqlite3ext_h = try ps.target.path(owner, "loadable-ext-sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
+
+        try Preprocessor.sqlite3(owner.allocator, ps.io, sqlite3_h, loadable_sqlite3_h);
+        try Preprocessor.sqlite3ext(owner.allocator, ps.io, sqlite3ext_h, loadable_sqlite3ext_h);
+    }
+};
+
+fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) void {
+    var wf = b.addWriteFiles();
+
+    const preprocess = PreprocessStep.create(b, .{
+        .source = sqlite_dep.path("."),
+        .target = wf.getDirectory(),
+        .io = io,
+    });
+    preprocess.step.dependOn(&wf.step);
+
+    const w = b.addUpdateSourceFiles();
+    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3.h") catch @panic("OOM"), "c/loadable-ext-sqlite3.h");
+    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3ext.h") catch @panic("OOM"), "c/loadable-ext-sqlite3ext.h");
+    w.step.dependOn(&preprocess.step);
+
+    const preprocess_headers = b.step("preprocess-headers", "Preprocess the headers for the loadable extensions");
+    preprocess_headers.dependOn(&w.step);
+}
+
 fn getTarget(original_target: ResolvedTarget) ResolvedTarget {
     var tmp = original_target;
 
@@ -146,8 +210,6 @@ pub fn build(b: *std.Build) !void {
     const query = b.standardTargetOptionsQueryOnly(.{});
     const target = b.resolveTargetQuery(query);
     const optimize = b.standardOptimizeOption(.{});
-    var threaded = Io.Threaded.init_single_threaded;
-    const io = threaded.io();
 
     // Upstream dependency
     const sqlite_dep = b.dependency("sqlite", .{
@@ -190,49 +252,7 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    inline for (std.meta.fields(BoolFeatureOptions)) |field| {
-        comptime var buf: [field.name.len]u8 = undefined;
-        const name = comptime std.ascii.upperString(&buf, field.name);
-        const opt = b.option(bool, field.name, "Set SQLITE_" ++ name);
-
-        if (opt) |v| {
-            const flag_value = if (v) "1" else "0";
-            const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_" ++ name ++ "={s}", .{flag_value});
-
-            try flags.append(b.allocator, flag);
-        }
-    }
-
-    inline for (std.meta.fields(DefineFeatureOptions)) |field| {
-        comptime var buf: [field.name.len]u8 = undefined;
-        const name = comptime std.ascii.upperString(&buf, field.name);
-        const opt = b.option(bool, field.name, "Set SQLITE_" ++ name) orelse false;
-
-        if (opt) {
-            const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_" ++ name, .{});
-
-            try flags.append(b.allocator, flag);
-        }
-    }
-
-    inline for (std.meta.fields(IntFeatureOptions)) |field| {
-        comptime var buf: [field.name.len]u8 = undefined;
-        const name = comptime std.ascii.upperString(&buf, field.name);
-        const opt = b.option(field.type, field.name, "Set SQLITE_" ++ name);
-
-        if (opt) |v| {
-            const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_" ++ name ++ "={}", .{v});
-
-            try flags.append(b.allocator, flag);
-        }
-    }
-
     const c_flags = flags.items;
-
-    // Preprocess the upstream sqlite3.h / sqlite3ext.h into
-    // c/loadable-ext-*.h so `zig translate-c` can produce the
-    // c_bindings_ext module (used for loadable extensions).
-    const preprocess = addPreprocessStep(b, io, sqlite_dep);
 
     //
     // Main library and module
@@ -312,8 +332,6 @@ pub fn build(b: *std.Build) !void {
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
     }
-
-    test_step.dependOn(&preprocess.step);
 }
 
 fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
@@ -357,72 +375,6 @@ fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std
     return run;
 }
 
-fn addPreprocessStep(b: *std.Build, io: Io, sqlite_dep: *std.Build.Dependency) *PreprocessStep {
-    var wf = b.addWriteFiles();
-
-    const preprocess = PreprocessStep.create(b, .{
-        .source = sqlite_dep.path("."),
-        .target = wf.getDirectory(),
-        .io = io,
-    });
-    preprocess.step.dependOn(&wf.step);
-
-    const w = b.addUpdateSourceFiles();
-    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3.h") catch @panic("OOM"), "c/loadable-ext-sqlite3.h");
-    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3ext.h") catch @panic("OOM"), "c/loadable-ext-sqlite3ext.h");
-    w.step.dependOn(&preprocess.step);
-
-    const preprocess_headers = b.step("preprocess-headers", "Preprocess the headers for the loadable extensions");
-    preprocess_headers.dependOn(&w.step);
-
-    return preprocess;
-}
-
-const PreprocessStep = struct {
-    const Config = struct {
-        source: std.Build.LazyPath,
-        target: std.Build.LazyPath,
-        io: Io,
-    };
-
-    step: std.Build.Step,
-
-    source: std.Build.LazyPath,
-    target: std.Build.LazyPath,
-    io: Io,
-
-    fn create(owner: *std.Build, config: Config) *PreprocessStep {
-        const step = owner.allocator.create(PreprocessStep) catch @panic("OOM");
-        step.* = .{
-            .step = std.Build.Step.init(.{
-                .id = std.Build.Step.Id.custom,
-                .name = "preprocess",
-                .owner = owner,
-                .makeFn = make,
-            }),
-            .source = config.source,
-            .target = config.target,
-            .io = config.io,
-        };
-
-        return step;
-    }
-
-    fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) !void {
-        const ps: *PreprocessStep = @fieldParentPtr("step", step);
-        const owner = step.owner;
-
-        const sqlite3_h = try ps.source.path(owner, "sqlite3.h").getPath3(owner, step).toString(owner.allocator);
-        const sqlite3ext_h = try ps.source.path(owner, "sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
-
-        const loadable_sqlite3_h = try ps.target.path(owner, "loadable-ext-sqlite3.h").getPath3(owner, step).toString(owner.allocator);
-        const loadable_sqlite3ext_h = try ps.target.path(owner, "loadable-ext-sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
-
-        try Preprocessor.sqlite3(owner.allocator, ps.io, sqlite3_h, loadable_sqlite3_h);
-        try Preprocessor.sqlite3ext(owner.allocator, ps.io, sqlite3ext_h, loadable_sqlite3ext_h);
-    }
-};
-
 // See https://www.sqlite.org/compile.html for flags
 const EnableOptions = struct {
     api_armor: bool = false,
@@ -453,37 +405,3 @@ const EnableOptions = struct {
     stat4: bool = false,
 };
 
-/// `false` = won't be defined
-/// `true` = will be defined
-const DefineFeatureOptions = enum {
-    like_doesnt_match_blobs,
-    omit_decltype,
-    omit_deprecated,
-    omit_progress_callback,
-    omit_shared_cache,
-    omit_autoinit,
-    use_alloca,
-    zero_malloc,
-    debug,
-    memdebug,
-    win32_malloc,
-    win32_heap_create,
-    win32_malloc_validate,
-};
-
-/// - `null` = default
-/// - `true` = `1`
-/// - `false` = `0`
-const BoolFeatureOptions = enum {
-    default_memstatus,
-    strict_subtype,
-    os_other,
-};
-
-/// The compile-time options with an int argument.
-const IntFeatureOptions = struct {
-    DQS: std.math.IntFittingRange(0, 3),
-    threadsafe: std.math.IntFittingRange(0, 2),
-    default_wal_synchronous: std.math.IntFittingRange(0, 3),
-    max_expr_depth: c_int,
-};
